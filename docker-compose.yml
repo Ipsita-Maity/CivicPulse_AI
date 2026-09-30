@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. SOVEREIGN GEOSPATIAL DATABASE (PostgreSQL 16 + PostGIS 3.4 + pgvector)
+  # ---------------------------------------------------------------------------
+  database:
+    image: postgis/postgis:16-3.4
+    container_name: civicpulse_postgis
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-civicpulse_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-SovereignCivicPulse2026!}
+      POSTGRES_DB: ${POSTGRES_DB:-civicpulse_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U civicpulse_admin -d civicpulse_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - civicpulse_sovereign_net
+
+  # ---------------------------------------------------------------------------
+  # 2. IN-MEMORY CACHE & CELERY TASK BROKER (Redis 7)
+  # ---------------------------------------------------------------------------
+  cache:
+    image: redis:7-alpine
+    container_name: civicpulse_redis
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-SovereignRedis2026!}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-SovereignRedis2026!}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - civicpulse_sovereign_net
+
+  # ---------------------------------------------------------------------------
+  # 3. BACKEND API & PRIORITISATION ENGINE (FastAPI)
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: civicpulse_api
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: civicpulse_admin
+      POSTGRES_PASSWORD: SovereignCivicPulse2026!
+      POSTGRES_DB: civicpulse_db
+      REDIS_HOST: cache
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: SovereignRedis2026!
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+    command: ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    networks:
+      - civicpulse_sovereign_net
+
+  # ---------------------------------------------------------------------------
+  # 4. CELERY ASYNC WORKER (Audio Transcription, NLP & Vector Deduplication)
+  # ---------------------------------------------------------------------------
+  celery_worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: civicpulse_worker
+    restart: always
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: civicpulse_admin
+      POSTGRES_PASSWORD: SovereignCivicPulse2026!
+      POSTGRES_DB: civicpulse_db
+      REDIS_HOST: cache
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: SovereignRedis2026!
+    volumes:
+      - ./backend:/app/backend
+    command: ["celery", "-A", "backend.app.workers.worker_config.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    networks:
+      - civicpulse_sovereign_net
+
+  # ---------------------------------------------------------------------------
+  # 5. FRONTEND CIVIC DASHBOARD & SIMULATOR (Next.js 14)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: civicpulse_web
+    restart: always
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8000
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    networks:
+      - civicpulse_sovereign_net
+
+volumes:
+  postgis_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  civicpulse_sovereign_net:
+    driver: bridge
